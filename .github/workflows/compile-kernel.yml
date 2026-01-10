@@ -1,94 +1,59 @@
 #==========================================================================
-# Description: Compile the kernel
-# Copyright (C) 2021 https://github.com/unifreq/openwrt_packit
-# Copyright (C) 2021 https://github.com/ophub/amlogic-s9xxx-armbian
-# Copyright (C) 2021 https://github.com/ophub/fnnas
+# Description: Compile the fnnas kernel
+# Copyright (C) 2025 https://fnnas.com
+# Copyright (C) 2026 https://github.com/ophub/fnnas
 #==========================================================================
 
-name: Compile the kernel
+name: Compile the fnnas kernel
 
 on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
-      kernel_source:
-        description: "Select the kernel source"
+      fnnas_repo:
+        description: "Set fnnas source repository"
         required: false
-        default: "unifreq"
+        default: "ophub/fnnas"
         type: choice
         options:
-          - unifreq
-          - ophub
-      kernel_version:
-        description: "Select kernel version"
+          - ophub/fnnas
+      fnnas_base_version:
+        description: "Select fnnas base image version"
+        required: false
+        default: "amlogic_300"
+        type: choice
+        options:
+          - amlogic_300
+          - rockchip_296
+      debs_version:
+        description: "Set fnnas debs version"
         required: false
         default: "6.12.y"
         type: choice
         options:
-          - 5.10.y
-          - 5.15.y
-          - 6.1.y
-          - 6.6.y
           - 6.12.y
-      kernel_auto:
-        description: "Auto use the latest kernel"
+      debs_install:
+        description: "Install kernel debs files"
+        required: false
+        default: "no"
+        type: choice
+        options:
+          - amlogic
+          - allwinner
+          - rockchip
+          - no
+      dtbs_install:
+        description: "Install kernel dtbs files"
         required: false
         default: true
         type: boolean
-      delete_source:
-        description: "Delete source after compilation"
-        required: false
-        default: true
-        type: boolean
-      kernel_package:
-        description: "Select compile package list"
-        required: false
-        default: "all"
-        type: choice
-        options:
-          - all
-          - dtbs
-      kernel_toolchain:
-        description: "Select the compilation toolchain"
-        required: false
-        default: "gcc"
-        type: choice
-        options:
-          - clang
-          - gcc
-          - gcc-15.2
-          - gcc-14.3
-          - gcc-14.2
-      ccache_clear:
-        description: "Set whether to clear the cache"
-        required: false
-        default: false
-        type: boolean
-      docker_image:
-        description: "Select Armbian docker image"
-        required: false
-        default: "trixie"
-        type: choice
-        options:
-          - trixie
-          - bookworm
-          - noble
-          - jammy
-      kernel_sign:
-        description: "Set the kernel custom signature"
-        required: false
-        default: "-ophub"
-        type: choice
-        options:
-          - -ophub
-          - -yourname
 
 env:
   TZ: Etc/UTC
 
 jobs:
   build:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     if: ${{ github.event.repository.owner.id }} == ${{ github.event.sender.id }}
 
     steps:
@@ -107,7 +72,7 @@ jobs:
           sudo rm -f /swapfile /mnt/swapfile
           sudo -E apt-get -y update
           sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
-          sudo -E apt-get -y install $(curl -fsSL https://ophub.org/ubuntu2404-build-armbian-depends)
+          sudo -E apt-get -y install $(curl -fsSL https://ophub.org/ubuntu2404-make-fnnas-depends)
           sudo -E systemctl daemon-reload
           #sudo -E apt-get -y full-upgrade
           sudo -E apt-get -y autoremove --purge
@@ -141,50 +106,68 @@ jobs:
           df -Th
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Get kernel source hash
-        id: kernelhash
+      - name: Download latest fnnas image
+        id: down
+        working-directory: /builder
+        if: (!cancelled())
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get the latest source hash from the kernel repository
-          api_url="https://api.github.com/repos/${{ inputs.kernel_source }}/linux-${{ inputs.kernel_version }}/git/ref/heads/main"
-          source_hash=$(curl -fsSL -m 20 \
+          echo "Starting to download the latest fnnas base image..."
+          fnnas_base_version="${{ inputs.fnnas_base_version }}"
+          [[ -d "fnnas" ]] || mkdir -p fnnas
+
+          latest_version=$(curl -s \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              ${api_url} |
-              jq -r '.object.sha'
-          )
-          [[ -z "${source_hash}" || "${source_hash}" == "null" ]] && source_hash="${{ github.sha }}"
-          echo "source_hash=${source_hash}" >> ${GITHUB_ENV}
+              https://api.github.com/repos/ophub/fnnas/releases?per_page=20 | \
+              jq -r --arg RTK "fnnas_base_image" \
+              --arg BOARD "${fnnas_base_version}" \
+              '[.[] | select(.tag_name | contains($RTK))] |
+              map(.assets[] | select(.name | contains($BOARD) and endswith(".img.xz"))) |
+              sort_by(.updated_at) |
+              reverse |
+              .[0] |
+              {data: .updated_at, url: .url, name: .name}')
+
+          [[ -z "${latest_version}" || "${latest_version}" == "null" ]] && {
+              echo "Invalid fnnas image file download address."
+              exit 1
+          }
+
+          latest_url="$(echo ${latest_version} | jq -r '.url')"
+          fnnas_filename="$(echo ${latest_version} | jq -r '.name')"
+          echo "Downloading: ${fnnas_filename}"
+          echo "Source: ${latest_url}"
+
+          curl -fsSL \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              "${latest_url}" \
+              -o "fnnas/${fnnas_filename}"
+
+          [[ "${?}" -ne "0" ]] && echo "Download failed." && exit 1
+
+          ln -sf /builder/fnnas ${{ github.workspace }}/fnnas
+          ln -sf /builder/fnnas /home/runner/work/_actions/ophub/fnnas/main/fnnas
+
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: /builder/ccache
-          key: kernel-${{ inputs.kernel_toolchain }}-${{ inputs.kernel_version }}-${{ env.source_hash }}
-          restore-keys: |
-            kernel-${{ inputs.kernel_toolchain }}-${{ inputs.kernel_version }}-
-
-      - name: Compile the kernel [ ${{ inputs.kernel_version }} ]
-        uses: ophub/amlogic-s9xxx-armbian@main
-        if: ${{ steps.disk.outputs.status }} == 'success' && !cancelled()
+      - name: Compile the fnnas kernel [ ${{ inputs.debs_version }} ]
+        uses: ophub/fnnas@main
+        if: ${{ steps.down.outputs.status }} == 'success' && !cancelled()
         with:
           build_target: kernel
-          kernel_source: ${{ inputs.kernel_source }}
-          kernel_version: ${{ inputs.kernel_version }}
-          kernel_auto: ${{ inputs.kernel_auto }}
-          delete_source: ${{ inputs.delete_source }}
-          kernel_package: ${{ inputs.kernel_package }}
-          kernel_sign: ${{ inputs.kernel_sign }}
-          kernel_toolchain: ${{ inputs.kernel_toolchain }}
-          ccache_clear: ${{ inputs.ccache_clear }}
-          docker_hostpath: /builder
-          docker_image: ophub/armbian-${{ inputs.docker_image }}:arm64
+          fnnas_repo: ${{ inputs.fnnas_repo }}
+          debs_version: ${{ inputs.debs_version }}
+          debs_install: ${{ inputs.debs_install }}
+          debs_install: ${{ inputs.debs_install }}
 
       - name: Upload Kernel to Release
         uses: ncipollo/release-action@main
         if: ${{ env.PACKAGED_STATUS }} == 'success' && !cancelled()
         with:
-          tag: kernel_stable
+          tag: kernel_fnnas
           artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
           allowUpdates: true
           removeArtifacts: false
@@ -192,9 +175,9 @@ jobs:
           makeLatest: false
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            - These are Mainline LTS(Long Term Support) kernels that provide `stable` support for FnNAS.
-            - It works with most `Amlogic`, `Rockchip`, and `Allwinner` devices. For specific details, please refer to the instructions on the homepage of repository.
-            - Dedicated BSP kernels for other Rockchip and Allwinner devices can be downloaded from the [ophub/kernel](https://github.com/ophub/kernel) repository.
-            - 这些是主线 LTS（长期支持）内核，为 FnNAS 提供`稳定`的支持。
-            - 适用于 `amlogic`，`rockchip`，`allwinner` 的大部分设备，具体可以参考仓库首页的说明。
-            - 其他的 Rockchip 和 Allwinner 设备专用 BSP 内核可以在 [ophub/kernel](https://github.com/ophub/kernel) 仓库里下载使用。
+            - FnNAS Dedicated Kernel. Based on official [dtbs](https://github.com/ophub/fnnas/releases/tag/kernel_fnnas) packages from `fnnas.com`,
+              and repackaged into .tar.gz format using the `rekernel` tool.
+              It is optimized for batch packaging and supports online updates via the `fnnas-update` command.
+            - FnNAS 专用内核。基于 `fnnas.com` 官方提供的 [dtbs](https://github.com/ophub/fnnas/releases/tag/kernel_fnnas) 安装包，
+              利用本仓库的 `rekernel` 工具重新封装为 .tar.gz 格式。
+              该内核既适用于批量打包，也支持通过 `fnnas-update` 命令进行在线更新。
