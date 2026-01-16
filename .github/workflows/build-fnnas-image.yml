@@ -18,6 +18,7 @@ on:
           - amlogic_338
           - amlogic_322
           - amlogic_300
+          - allwinner_335
           - allwinner_317
           - rockchip_330
           - rockchip_321
